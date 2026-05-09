@@ -3,143 +3,151 @@ name: gitlab-mr-review
 description: Fetch, review, and post inline comments on a GitLab Merge Request. Use when user asks to review a GitLab MR/PR, audit code changes, or comment on a merge request.
 ---
 
-> **⚠ 严禁调用 MR Approve 接口（`/merge_requests/:iid/approve`）。**
+> **⚠ Do NOT call the MR Approve endpoint (`/merge_requests/:iid/approve`) under any circumstance.**
 
 # gitlab-mr-review
 
 ---
 
-## Step 0 — 前置必要步骤：PreToolUse hook（必须完成）
+## Language conventions
 
-由于 Claude Code 对任何含 `$GITLAB_TOKEN` / `$env:GITLAB_TOKEN` 变量展开的命令都会弹审批，**不配 hook 会让一次 MR review 触发几十次审批**。本 skill 把 hook 作为必需前置，未配置完成时**中止流程**，不进入后续任何步骤。
-
-**本 skill 要求的 hook 版本：`REQUIRED_HOOK_VERSION = 1.2.0`**（每次模板更新会 bump）。
-
-### 0.1 用 Read 工具读取 hook 文件，提取版本号
-
-**不要**使用 Bash / PowerShell 读文件——那会走命令审批，反而触发本 skill 最想规避的弹窗。用 Claude Code 的 `Read` 工具直接读：
-
-- **bash / macOS / Linux / WSL / Git Bash 用户**：`Read` 文件 `~/.claude/hooks/allow-gitlab-curl.sh`
-- **Windows 原生 PowerShell 用户**：`Read` 文件 `%USERPROFILE%\.claude\hooks\allow-gitlab-curl.ps1`（若不确定路径是否被展开，先询问用户 `$HOME` 的值）
-
-读到文件后：
-- 在 `.sh` 正文中查找形如 `HOOK_VERSION="x.y.z"` 的行，提取 `x.y.z` 作为 `LOCAL`
-- 在 `.ps1` 正文中查找形如 `$HookVersion = 'x.y.z'` 的行，提取 `x.y.z` 作为 `LOCAL`
-- 如果 `Read` 报错"文件不存在"，把 `LOCAL` 视为 `MISSING`
-
-### 0.2 根据本地版本决定行动
-
-| `local` 值 | 状态 | 行动 |
-|-----------|------|------|
-| `MISSING` | 未安装 | 进入下方「A. 未安装时：代用户配置」流程 |
-| 等于 `1.2.0` | 已是最新 | 视为已配置完成，继续 Step 1 |
-| 小于 `1.2.0` | 过期 | 进入下方「B. 版本过期时：代用户升级」流程 |
-
-> 配置完成后必须让用户**重启 Claude Code 会话**并重新执行 `/gitlab-mr-review <MR URL>`——新 hook 只在下次会话启动时被加载。
-
-### A. 未安装时：代用户配置
-
-不要只抛引导让用户自己读 HOOK-SETUP.md——直接**按步骤帮用户完成配置**：
-
-1. **用 `Read` 工具读取仓库内的 `hooks/HOOK-SETUP.md`**，以它为权威步骤来源（路径形如 `~/.claude/skills/gitlab-mr-review/hooks/HOOK-SETUP.md`，具体看 skill 安装位置）。同时 `Read` 对应的模板脚本（`hooks/allow-gitlab-curl.sh` 或 `.ps1`）拿到最新内容。
-2. **询问用户公司的 GitLab host**（例如 `gitlab.corp.example.com`）——这是脚本里 `ALLOWED_HOST` / `$AllowedHost` 唯一需要用户输入的变量。从正在评审的 MR URL 里能推断出主机名，先**猜测**并请用户确认，不要瞎猜后直接写入。
-3. **用 `Write` 工具**把模板内容写到用户目录：
-   - bash：`~/.claude/hooks/allow-gitlab-curl.sh`
-   - PowerShell：`$HOME\.claude\hooks\allow-gitlab-curl.ps1`
-
-   写入时把 `ALLOWED_HOST="gitlab.example.com"` / `$AllowedHost = 'gitlab.example.com'` 替换为用户确认的 host。写入目录不存在时用 Bash `mkdir -p ~/.claude/hooks`（这条命令不含 token / URL / `$(...)`，走正常审批即可）。bash 版写完后记得 `chmod +x`。
-4. **处理 `~/.claude/settings.json`**：先 `Read` 现有内容（不存在则视为 `{}`），把 `hooks.PreToolUse` 数组里追加本 skill 需要的 matcher 条目（参考 HOOK-SETUP.md 的 JSON 片段），再用 `Write` 覆盖写回。**关键约束**：
-   - 保留用户已有的其他字段（`env` / `theme` / `permissions` / 其他 hook 条目），不要整个覆盖
-   - 如果已存在同 `command` 的条目，跳过不重复添加
-   - 写回前把最终 JSON 给用户**预览并获得明确确认**后再写入
-5. 全部完成后，输出一行提示：
-
-   > hook 已安装（版本 1.2.0），host = `<USER_HOST>`。**请重启 Claude Code 会话**后重新执行 `/gitlab-mr-review <MR URL>`，新 hook 才会生效。
-
-**边界**：
-- 不要替用户修改或设置 `GITLAB_TOKEN` / `$env:GITLAB_TOKEN` 环境变量——token 必须由用户自己在 shell profile 里配置。
-- 不要尝试"降级"绕过 hook（如让用户一次性批准、把 token 内联成字面值）。
-
-### B. 版本过期时：代用户升级
-
-和 A 段流程一致，但跳过"询问 host"——先 `Read` 用户本地旧脚本，**保留其 `ALLOWED_HOST` 值**，再用新模板覆盖。`settings.json` 通常不需改动（除非 HOOK-SETUP.md 的 JSON 片段也变了）。升级完同样提醒用户**重启会话**。
+- **All dialog with the user is in Chinese (Simplified).** Every message this skill prints — progress updates, prompts, summaries, previews, error reports, confirmation questions — must be in Chinese. Treat the English text in this document as implementation spec, not as copy to reproduce verbatim.
+- **All review comments posted to GitLab are in Chinese (Simplified).** This applies to both the NEW discussion `body` and the REPLY `body`.
+- Field names, API paths, code identifiers, and command syntax stay in their original form (English / ASCII).
 
 ---
 
-## 参数
+## Step 0 — Mandatory prerequisite: PreToolUse hook
 
-调用时可附带 MR 完整 URL 作为参数，例如：
+Claude Code prompts for approval on any command that expands `$GITLAB_TOKEN` / `$env:GITLAB_TOKEN`. **Without the hook, a single MR review can trigger dozens of approval prompts.** This skill treats the hook as a hard prerequisite — if it is not in place, **abort immediately** and do not proceed to any later step.
+
+**Required hook version for this skill: `REQUIRED_HOOK_VERSION = 1.2.0`** (bumped whenever the template changes).
+
+### 0.1 Read the hook file with the Read tool and extract its version
+
+**Do NOT** read the hook file via Bash / PowerShell — that itself triggers a command-approval prompt, which is exactly what this skill is trying to avoid. Use Claude Code's `Read` tool directly:
+
+- **bash / macOS / Linux / WSL / Git Bash users**: `Read` the file `~/.claude/hooks/allow-gitlab-curl.sh`
+- **Native Windows PowerShell users**: `Read` the file `%USERPROFILE%\.claude\hooks\allow-gitlab-curl.ps1` (if you are unsure whether that path expands, ask the user what `$HOME` resolves to)
+
+Once read:
+- In `.sh`, find a line like `HOOK_VERSION="x.y.z"` and take `x.y.z` as `LOCAL`.
+- In `.ps1`, find a line like `$HookVersion = 'x.y.z'` and take `x.y.z` as `LOCAL`.
+- If `Read` reports "file not found", treat `LOCAL` as `MISSING`.
+
+### 0.2 Decide what to do based on the local version
+
+| `local` value | Status | Action |
+|---------------|--------|--------|
+| `MISSING`     | Not installed | Go to **A. Not installed — install on the user's behalf** |
+| equal to `1.2.0` | Up to date | Treat as configured; continue to Step 1 |
+| less than `1.2.0` | Outdated | Go to **B. Outdated — upgrade on the user's behalf** |
+
+> After any configuration change the user **must restart their Claude Code session** and re-run `/gitlab-mr-review <MR URL>` — new hooks are only loaded on session startup.
+
+### A. Not installed — install on the user's behalf
+
+Do not just point the user at HOOK-SETUP.md and walk away; **guide them through the install step by step**:
+
+1. **Use `Read` to open `hooks/HOOK-SETUP.md` in this repo** as the authoritative source (path is typically `~/.claude/skills/gitlab-mr-review/hooks/HOOK-SETUP.md`, depending on where the skill is installed). Also `Read` the matching template script (`hooks/allow-gitlab-curl.sh` or `.ps1`) to get the latest contents.
+2. **Ask the user for their company's GitLab host** (e.g. `gitlab.corp.example.com`) — this is the single variable `ALLOWED_HOST` / `$AllowedHost` in the script that the user must provide. You can **infer** the hostname from the MR URL being reviewed and ask the user to confirm; do not silently guess and write it in.
+3. **Use the `Write` tool** to write the template to the user's home directory:
+   - bash: `~/.claude/hooks/allow-gitlab-curl.sh`
+   - PowerShell: `$HOME\.claude\hooks\allow-gitlab-curl.ps1`
+
+   When writing, substitute `ALLOWED_HOST="gitlab.example.com"` / `$AllowedHost = 'gitlab.example.com'` with the confirmed host. If the target directory does not exist, run `mkdir -p ~/.claude/hooks` via Bash (this command contains no token / URL / `$(...)`, so the normal approval prompt is fine). For the bash version, remember to `chmod +x` afterwards.
+4. **Handle `~/.claude/settings.json`**: first `Read` the current contents (treat as `{}` if absent), append this skill's required matcher entries to the `hooks.PreToolUse` array (see the JSON snippet in HOOK-SETUP.md), then `Write` it back. **Key constraints**:
+   - Preserve the user's other fields (`env` / `theme` / `permissions` / other hook entries) — do not overwrite the whole file.
+   - If an entry with the same `command` already exists, skip it — do not add a duplicate.
+   - Before writing back, **preview the final JSON to the user and get explicit confirmation**.
+5. Once everything is in place, print this line:
+
+   > Hook installed (version 1.2.0), host = `<USER_HOST>`. **Please restart your Claude Code session**, then re-run `/gitlab-mr-review <MR URL>` so the new hook is loaded.
+
+**Boundaries**:
+- Do not set or modify the user's `GITLAB_TOKEN` / `$env:GITLAB_TOKEN` — the token must be configured by the user in their own shell profile.
+- Do not try to "work around" the hook (e.g. by asking the user to approve once-for-all, or by inlining the token as a literal string).
+
+### B. Outdated — upgrade on the user's behalf
+
+Same flow as A, but skip the "ask for host" step — first `Read` the user's existing local script and **preserve its `ALLOWED_HOST` value**, then overwrite with the new template. `settings.json` usually needs no change (unless HOOK-SETUP.md's JSON snippet also changed). After the upgrade, remind the user to **restart the session**.
+
+---
+
+## Parameters
+
+The skill accepts the full MR URL as an argument, e.g.:
 `/gitlab-mr-review https://gitlab.example.com/group/repo/-/merge_requests/42`
 
-若未提供，则在 Step 2 中询问用户。
+If omitted, ask the user for it in Step 2.
 
 ---
 
-## Step 1 — 依赖工具
+## Step 1 — Required tools
 
-本 skill 与 hook 用到：
+This skill and its hook rely on:
 
-- **bash 分支**：`curl`, `jq`, `base64`, `sed`, `grep`（主流 Unix 系统默认齐全）
-- **Windows 原生 PowerShell 分支**：仅需 PowerShell 7+ 的内建 cmdlet，无外部依赖
+- **bash branch**: `curl`, `jq`, `base64`, `sed`, `grep` (available by default on mainstream Unix systems).
+- **Native Windows PowerShell branch**: only PowerShell 7+ built-in cmdlets, no external deps.
 
-**不要主动预检**——预检本身是复杂 bash 语句，会弹审批，反而触发本 skill 最想规避的行为。直接进入后续步骤；如果某条命令后来报 `command not found`，那时再提示用户安装对应工具（Debian/Ubuntu 用 `sudo apt install jq coreutils sed grep curl`，macOS 用 `brew install jq coreutils gnu-sed grep curl`，Windows 升 `winget install Microsoft.PowerShell` 到 7+）。
+**Do NOT pre-flight these proactively** — a pre-flight is itself a complex bash statement that triggers approval, defeating the purpose. Proceed straight into the real steps; if some command later returns `command not found`, only then prompt the user to install it (Debian/Ubuntu: `sudo apt install jq coreutils sed grep curl`; macOS: `brew install jq coreutils gnu-sed grep curl`; Windows: `winget install Microsoft.PowerShell` to get PowerShell 7+).
 
 ---
 
-## Step 2 — 解析 MR URL
+## Step 2 — Parse the MR URL
 
-从调用参数或用户输入中提取以下变量：
+From the argument or user input, extract:
 `https://gitlab.example.com/group/repo/-/merge_requests/42`
 
 - `$GITLAB_HOST` = `https://gitlab.example.com`
 - `$PROJECT_PATH` = `group/repo`
-- `$PROJECT_PATH_ENCODED` = `group%2Frepo`（`/` → `%2F`）
+- `$PROJECT_PATH_ENCODED` = `group%2Frepo` (replace `/` with `%2F`)
 - `$MR_IID` = `42`
 
-若无法从参数解析，询问用户提供完整 MR URL。
+If you cannot parse these, ask the user for the full MR URL.
 
 ---
 
-## Step 3 — 检测运行环境
+## Step 3 — Detect the runtime environment
 
-执行以下命令判断当前 shell 类型，**后续所有步骤根据结果选择对应示例**：
+Run the following to determine the current shell, **then use the matching example in every later step**:
 
 ```bash
 uname -s 2>/dev/null || echo "Windows"
 ```
 
-- 输出 `Linux` / `Darwin`：使用 **bash** 示例
-- 命令不存在或输出 `Windows`：使用 **PowerShell** 示例
+- Output `Linux` / `Darwin` → use the **bash** examples.
+- Command not found, or output `Windows` → use the **PowerShell** examples.
 
-> PowerShell 特别注意：
+> PowerShell notes:
 >
-> - 用 `Invoke-RestMethod` 替代 `curl`（原生解析 JSON，无需 jq）
-> - 环境变量写法为 `$env:GITLAB_TOKEN`
-> - 所有请求均加 `-SkipCertificateCheck`（需 PowerShell 7+）
+> - Use `Invoke-RestMethod` instead of `curl` (it parses JSON natively, no jq needed).
+> - Environment variable syntax is `$env:GITLAB_TOKEN`.
+> - Every request must include `-SkipCertificateCheck` (PowerShell 7+ required).
 
 ---
 
-## 执行约定（bash，重要）
+## Execution conventions (bash, important)
 
-下方 bash 示例中的 `$GITLAB_HOST` / `$PROJECT_PATH_ENCODED` / `$MR_IID` / `$BASE_SHA` / `$START_SHA` / `$HEAD_SHA` 都是**占位符**。执行时必须遵守：
+The placeholders `$GITLAB_HOST` / `$PROJECT_PATH_ENCODED` / `$MR_IID` / `$BASE_SHA` / `$START_SHA` / `$HEAD_SHA` in the bash examples below must be handled carefully:
 
-- **不要使用 `export`** 设置它们，也不要使用 `VAR=value curl ...` 这种前置赋值写法——会让命令不以 `curl` 开头，PreToolUse hook 无法识别放行。
-- 每条 `curl` 命令里把这些占位符**直接替换为字面值**，使命令以 `curl -sfk -H "PRIVATE-TOKEN: ...` 开头。
-- `$GITLAB_TOKEN` 例外：保留原样，由用户的系统环境变量提供（hook 会放行）。
+- **Do NOT use `export`** to set them, and do NOT use the `VAR=value curl ...` inline-assignment form — either makes the command not start with `curl`, and the PreToolUse hook will fail to recognize and allow it.
+- In every `curl` command, **substitute these placeholders with literal values**, so the command starts with `curl -sfk -H "PRIVATE-TOKEN: ...`.
+- `$GITLAB_TOKEN` is the exception: leave it as-is — it's provided by the user's environment and the hook allows it.
 
-### 严禁落盘（硬性规则，任何步骤都适用）
+### No disk writes (hard rule, applies to every step)
 
-本 skill 的所有数据（diff、文件内容、MR 元数据、SHA、中间分析结果）**只在本次会话的上下文中内存保留**，禁止以任何方式写入磁盘。具体禁止：
+All data this skill handles (diffs, file contents, MR metadata, SHAs, intermediate analysis) **lives only in the session context memory** — it must not be written to disk under any circumstance. Specifically forbidden:
 
-- **禁止 shell 重定向**：`curl ... > /tmp/foo.json`、`curl ... | tee file`、`curl ... >> file` 等都不允许；hook 已拦截含 `>` / `<` 的命令，会走审批弹窗。
-- **禁止调用 `Write` 工具**创建任何 `.json` / `.md` / `.diff` / `.txt` 缓存——即使放在 `/tmp`、`.cache/`、`.claude/` 下也不行。唯一例外是 Step 0 代用户安装 hook 脚本那一次（写入 `~/.claude/hooks/` 和 `settings.json`），那是明确的一次性配置动作。
-- **禁止 `tee`、`mkfifo`、`jq > out`** 等隐式落盘手段。
+- **No shell redirection**: `curl ... > /tmp/foo.json`, `curl ... | tee file`, `curl ... >> file`, etc. The hook already blocks commands containing `>` / `<` and routes them to an approval prompt.
+- **No calls to the `Write` tool** to create any `.json` / `.md` / `.diff` / `.txt` caches — not in `/tmp`, not in `.cache/`, not in `.claude/`. The sole exception is the one-time hook install in Step 0 (which writes to `~/.claude/hooks/` and `settings.json`).
+- **No `tee`, `mkfifo`, `jq > out`**, or other implicit disk-write mechanisms.
 
-正确做法：一条 `curl | jq` 管道处理完就在上下文中形成分析结果，要再次引用就重跑请求。MR 数据量通常不足以让多拉几次 API 成为性能问题。
+The correct approach: a single `curl | jq` pipeline produces the analysis in context; if you need the data again later, just re-run the request. MR-sized data volumes never make extra API calls a performance concern.
 
 ---
 
-示例（Step 4 检查 token，用字面值替换后）：
+Example (Step 4 token check, after literal substitution):
 
 ```bash
 curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.example.com/api/v4/user" | jq '.name'
@@ -147,16 +155,16 @@ curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" "https://gitlab.example.com/api/v4/u
 
 ---
 
-## Step 4 — 检查环境变量
+## Step 4 — Check environment variables
 
-**bash（macOS / Linux）：**
+**bash (macOS / Linux):**
 
 ```bash
 curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   "$GITLAB_HOST/api/v4/user" | jq '.name'
 ```
 
-**PowerShell（Windows）：**
+**PowerShell (Windows):**
 
 ```powershell
 (Invoke-RestMethod -Uri "$GITLAB_HOST/api/v4/user" `
@@ -164,15 +172,15 @@ curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   -SkipCertificateCheck).name
 ```
 
-返回用户名则就绪，继续 Step 5。否则引导用户配置（**不要替用户执行这些命令**）：
+If a username is returned, the environment is ready — continue to Step 5. Otherwise guide the user to configure it (**do NOT run these commands for the user**):
 
-> 1. 打开 `$GITLAB_HOST/-/user_settings/personal_access_tokens`
-> 2. 创建 token，Scopes 勾选 **api**，复制
-> 3. 根据系统设置环境变量：
->    - bash（Linux）：`echo 'export GITLAB_TOKEN=glpat-xxx' >> ~/.bashrc`
->    - zsh（macOS）：`echo 'export GITLAB_TOKEN=glpat-xxx' >> ~/.zshrc`
->    - PowerShell（Windows，永久）：`[Environment]::SetEnvironmentVariable('GITLAB_TOKEN','glpat-xxx','User')`
-> 4. **关闭当前终端，重新打开一个新的会话**，然后用以下命令继续本次 review：
+> 1. Open `$GITLAB_HOST/-/user_settings/personal_access_tokens`.
+> 2. Create a token with the **api** scope and copy it.
+> 3. Set the environment variable for your shell:
+>    - bash (Linux): `echo 'export GITLAB_TOKEN=glpat-xxx' >> ~/.bashrc`
+>    - zsh (macOS): `echo 'export GITLAB_TOKEN=glpat-xxx' >> ~/.zshrc`
+>    - PowerShell (Windows, persistent): `[Environment]::SetEnvironmentVariable('GITLAB_TOKEN','glpat-xxx','User')`
+> 4. **Close the current terminal, open a fresh session**, and continue the review with:
 >
 >    ```
 >    /gitlab-mr-review $MR_URL
@@ -180,9 +188,9 @@ curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
 
 ---
 
-## Step 5 — 获取 diff_refs（行级评论必需）
+## Step 5 — Fetch diff_refs (required for line-level comments)
 
-**bash（macOS / Linux）：**
+**bash (macOS / Linux):**
 
 ```bash
 curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
@@ -190,7 +198,7 @@ curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   | jq '{title, state, diff_refs}'
 ```
 
-**PowerShell（Windows）：**
+**PowerShell (Windows):**
 
 ```powershell
 $mr = Invoke-RestMethod `
@@ -200,31 +208,77 @@ $mr = Invoke-RestMethod `
 $mr | Select-Object title, state, diff_refs
 ```
 
-保存以下三个值，发行级评论时必须全部提供：
+Save these three values — all three are mandatory when posting line-level comments:
 
-- `$BASE_SHA` ← `diff_refs.base_sha`
+- `$BASE_SHA`  ← `diff_refs.base_sha`
 - `$START_SHA` ← `diff_refs.start_sha`
-- `$HEAD_SHA` ← `diff_refs.head_sha`
+- `$HEAD_SHA`  ← `diff_refs.head_sha`
 
 ---
 
-## Step 6 — 获取 diff 并计算行号
+## Step 5.5 — Fetch existing discussions (for the analysis stage)
 
-每次取 100 条（GitLab 上限），从 page=1 开始逐页请求，直到返回空数组为止。
+Pull all current discussions on the MR. The goal is to let the later analysis stage know "has this line / this issue already been discussed?" so that the skill can avoid duplicate comments and, when appropriate, append information as a reply instead of opening a new discussion.
 
-**⚠ 执行约束（必须遵守）：**
-- 逐页获取后**先累积所有页结果**，待全部获取完毕后再统一分析，保证跨文件上下文完整
-- 只使用本文档定义的命令，不得自行增加文件搜索、索引查找等额外操作
-- 若某文件 `diff` 字段为空且 `too_large: true`，使用文件内容 API 获取 HEAD 版本全量内容进行审查（见下方"处理 too_large 文件"）
+**bash (macOS / Linux):**
 
-**bash（macOS / Linux）：**
+```bash
+curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions?per_page=100&page=PAGE"
+```
+
+**PowerShell (Windows):**
+
+```powershell
+Invoke-RestMethod `
+  -Uri "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions?per_page=100&page=PAGE" `
+  -Headers @{"PRIVATE-TOKEN" = $env:GITLAB_TOKEN} `
+  -SkipCertificateCheck
+```
+
+Increment `PAGE` starting from 1 until an empty array is returned.
+
+### Build in-memory indexes
+
+For each discussion, extract (in memory only — no disk writes):
+
+- `discussion_id` ← `.id`
+- `resolved`: `true` if `.notes[0].resolvable == true` AND every entry in `.notes[]` has `.resolved == true`; otherwise `false` (non-resolvable discussions are always treated as `false`).
+- `notes[]`: in chronological order, keep `{author, body, created_at}` — used by the LLM for semantic judgment later.
+
+Then put each discussion into **one of two separate index tables**, based on its `position` fields:
+
+- If `.notes[0].position.new_line` is set → put into `new_index`, key = `{position.new_path}:{position.new_line}`.
+- Otherwise (only `position.old_line` is set) → put into `old_index`, key = `{position.old_path}:{position.old_line}`.
+
+```
+new_index:  "src/foo.ts:42"  → [{discussion_id, resolved, notes}, ...]
+old_index:  "src/foo.ts:11"  → [{discussion_id, resolved, notes}, ...]
+```
+
+**Skip any discussion without a `position`** (i.e. MR-level comments, not line-level) — this skill does not handle them.
+
+When Step 7.1 queries later: if your new issue is to be posted against `new_line`, search `new_index`; if against `old_line` (a pure deletion), search `old_index`. The two tables never cross-match, so deletion-line comments and addition-line comments can never be erroneously merged.
+
+---
+
+## Step 6 — Fetch the diff and compute line numbers
+
+Fetch 100 items per page (GitLab's upper bound), page from 1 upwards, until the response is an empty array.
+
+**⚠ Execution constraints (must follow):**
+- Fetch page by page but **accumulate the results first** — only start analysis once every page has been collected, so cross-file context is intact.
+- Use only the commands defined in this document; do not spontaneously add file search / index lookup operations.
+- If a file has an empty `diff` and `too_large: true`, fall back to the file-contents API to review the HEAD version in full (see "Handling too_large files" below).
+
+**bash (macOS / Linux):**
 
 ```bash
 curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/diffs?per_page=100&page=PAGE"
 ```
 
-**PowerShell（Windows）：**
+**PowerShell (Windows):**
 
 ```powershell
 Invoke-RestMethod `
@@ -233,22 +287,22 @@ Invoke-RestMethod `
   -SkipCertificateCheck
 ```
 
-将 `PAGE` 从 1 开始递增，直到返回空数组为止，**先收集所有页的结果**，提取每个文件的 `new_path`、`old_path`、`diff`、`too_large` 字段，然后在 Step 7 中整体分析，避免因上下文不足造成理解偏差。
+Increment `PAGE` from 1 until the response is empty. **Collect results from every page first**, extract the `new_path`, `old_path`, `diff`, and `too_large` fields for each file, and then analyze them as a whole in Step 7 to avoid misreadings due to missing context.
 
-### 读取全量文件（分析时按需使用）
+### Fetching a full file (use on demand during analysis)
 
-分析 diff 时，若某文件的改动难以理解（缺少上下文、依赖其他文件等），可拉取该文件在 HEAD 的完整内容辅助理解：
+While analyzing the diff, if a change is hard to understand (missing context, depends on other files, etc.), fetch the full HEAD version of the file to help:
 
-**bash（macOS / Linux）：**
+**bash (macOS / Linux):**
 
 ```bash
-# FILE_PATH_ENCODED：将路径中的 / 替换为 %2F，如 src/foo.ts → src%2Ffoo.ts
+# FILE_PATH_ENCODED: replace / with %2F in the path, e.g. src/foo.ts → src%2Ffoo.ts
 curl -sfk -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/repository/files/FILE_PATH_ENCODED?ref=$HEAD_SHA" \
   | jq -r '.content' | base64 -d
 ```
 
-**PowerShell（Windows）：**
+**PowerShell (Windows):**
 
 ```powershell
 $filePath = "src%2Ffoo.ts"   # / → %2F
@@ -259,63 +313,102 @@ $file = Invoke-RestMethod `
 [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($file.content))
 ```
 
-### 处理 too_large 文件
+### Handling too_large files
 
-当某文件 `diff: ""` 且 `too_large: true` 时，使用上方"读取全量文件"的命令拉取 HEAD 版本进行全量审查，并在分析结论中注明该文件为全量审查（非 diff）。行级评论的 `new_line` 直接使用文件中的实际行号。
+When a file has `diff: ""` and `too_large: true`, use the "Fetching a full file" command above to pull the HEAD version and review it in full. Note in the analysis that the file was reviewed whole-file (not via diff). For line-level comments, use the file's actual line number directly as `new_line`.
 
-### 计算每行的绝对行号
+### Computing absolute line numbers for each line
 
-`@@` 头：`@@ -old_start,old_count +new_start,new_count @@`
+Hunk header: `@@ -old_start,old_count +new_start,new_count @@`
 
-初始化：`old_num = old_start`，`new_num = new_start`
+Initialize: `old_num = old_start`, `new_num = new_start`.
 
-| 行前缀         | position 用字段      | old_num | new_num |
-| -------------- | -------------------- | ------- | ------- |
-| ` `（context） | `new_line = new_num` | +1      | +1      |
-| `+`（新增）    | `new_line = new_num` | 不变    | +1      |
-| `-`（删除）    | `old_line = old_num` | +1      | 不变    |
+| Line prefix        | position field        | old_num | new_num |
+| ------------------ | --------------------- | ------- | ------- |
+| ` ` (context)      | `new_line = new_num`  | +1      | +1      |
+| `+` (addition)     | `new_line = new_num`  | —       | +1      |
+| `-` (deletion)     | `old_line = old_num`  | +1      | —       |
 
 ---
 
-## Step 7 — 分析 diff
+## Step 7 — Analyze the diff
 
-**先判断文件类型**：路径匹配 `*.test.ts` / `*.test.tsx` / `*.spec.ts` / `*.spec.tsx` / `__tests__/**` 的视为测试文件，按 [RULES.md 的"测试文件例外"](RULES.md) 执行，放宽生产代码规则（如不要评论 `as` 类型断言、重复 setup、魔法值等），只针对测试独有的反模式（`test.only`、条件断言、缺 `expect`、未 `await`）提问题。其余文件按生产代码标准评审。
+**First, classify the file**: paths matching `*.test.ts` / `*.test.tsx` / `*.spec.ts` / `*.spec.tsx` / `__tests__/**` are test files and follow the ["test file exceptions" in RULES.md](RULES.md) — relax production-code rules (e.g. do not complain about `as` type casts, duplicated setup, magic values) and only raise issues for test-specific anti-patterns (`test.only`, conditional assertions, missing `expect`, un-`await`ed promises). All other files follow production-code standards.
 
-检查变更行，关注：
+Inspect the changed lines, focusing on:
 
-- **功能完整性**：需求是否完整实现，是否存在遗漏的分支或场景
-- **逻辑正确性**：条件判断、循环、状态流转是否正确，有无逻辑漏洞或反转
-- **边界与异常**：空值、空集合、越界、并发、超时等边界情况是否处理（测试文件不适用——测试本身就是在喂边界）
-- **可简化性**：是否有冗余逻辑、重复代码（DRY）、过度抽象或可用语言内置替代的实现（测试文件倾向 DAMP，重复可接受）
-- **代码质量**：命名不清、多余复杂度、缺少错误处理、死代码
-- **安全**：注入、越权、硬编码密钥
-- **性能**：N+1 查询、热路径阻塞（测试文件不适用）
-- **代码规范**：见 [RULES.md](RULES.md)
+- **Functional completeness**: is the requirement fully implemented? Are any branches or scenarios missed?
+- **Logical correctness**: are conditionals, loops, and state transitions correct? Are there logic bugs or inversions?
+- **Edge cases and error paths**: empty values, empty collections, out-of-bounds, concurrency, timeouts — all handled? (Not applicable to test files — tests are by definition feeding edge inputs.)
+- **Simplification opportunities**: redundant logic, repeated code (DRY), over-abstraction, or reinvention of built-ins. (Test files lean toward DAMP — repetition is acceptable.)
+- **Code quality**: unclear naming, excess complexity, missing error handling, dead code.
+- **Security**: injection, authorization bypass, hard-coded secrets.
+- **Performance**: N+1 queries, blocking hot paths. (Not applicable to test files.)
+- **Code style**: see [RULES.md](RULES.md).
 
-每个问题记录：
+Record each issue as:
 
 ```
 file:     src/foo.ts
-new_line: 42        # 新增/context 行；纯删除行改用 old_line
+new_line: 42        # for addition/context lines; for pure deletion lines use old_line instead
 severity: CRITICAL | WARNING | SUGGESTION
-body:     中文描述 + 建议修复
+body:     Chinese description + suggested fix
 ```
 
-只关注变更行，评论内容必须用中文。
+Only review changed lines. **Comment bodies must be written in Chinese** (review-output language convention for this team).
+
+### 7.1 Decide the "send mode" by consulting existing discussions
+
+For each issue you intend to raise, first look it up in the indexes built in Step 5.5:
+
+- If you plan to post with `new_line` → look up `{file}:{new_line}` in `new_index`, plus the neighborhood `{file}:{new_line ± 3}`.
+- If you plan to post with `old_line` (a pure deletion line) → look up `{file}:{old_line}` in `old_index`, plus the neighborhood `{file}:{old_line ± 3}`.
+
+The ±3-line neighborhood exists to catch cases like "an existing discussion is anchored on the function signature, but my new issue is inside the function body". Whether the hits actually *overlap semantically* is decided **by you (the LLM) reading each discussion's `notes[].body`** — never apply a mechanical "same line ⇒ merge" rule.
+
+Based on that semantic judgment, fill in the `action` field:
+
+- **No hit (nothing in the neighborhood of either table)** → `action = NEW`: open a new discussion.
+- **Hit on an unresolved discussion that overlaps with your issue** → `action = SKIP_DUPLICATE`: skip.
+- **Hit on an unresolved discussion with different semantics (or you have a substantive addition)** → `action = REPLY`: reply on that discussion. Record `reply_to = discussion_id`. The reply body must explicitly acknowledge the thread (e.g. "Following up on the discussion above about X, one more note: ...").
+- **Hit on an unresolved discussion whose conclusion contradicts your view** → `action = SKIP_SUPERSEDED`: do not post. Explain in the Step 7.5 summary that an existing discussion reached the opposite conclusion and you are withdrawing.
+- **Only resolved discussions match** (no unresolved hits) → the resolved content is a reference for your judgment (e.g. the issue was raised before, fixed, but has been reintroduced). Default `action = NEW`, but the body may cite the historical discussion.
+
+The sole basis for semantic judgment is the `notes[].body` content — do not merge issues just because they land "near each other". A single region can legitimately have multiple independent problems.
+
+Every issue carries, finally:
+
+```
+file, new_line (or old_line), severity, body
+action:   NEW | REPLY | SKIP_DUPLICATE | SKIP_SUPERSEDED
+reply_to: <discussion_id>              # only when action = REPLY
+ref_note: <one-line gist of the matched discussion>   # required whenever any historical discussion (resolved ones included) was matched; shown in Step 7.5
+```
 
 ---
 
-## Step 7.5 — 汇总问题清单给用户
+## Step 7.5 — Summarize the issue list for the user
 
-分析完所有 diff 后，**不要立即发任何评论**。先向用户展示全部发现问题的**汇总**，**每条都要带 diff 上下文**（这是硬性要求——用户需要靠上下文判断问题是否成立，不能只给文件名和行号）。格式如下：
+After the diff analysis is complete, **do not post any comment yet**. First present the full list of findings as a **summary**, and **every item must include its diff context** (hard requirement — the user relies on the context to judge whether the issue is valid; file name + line number alone is not enough).
+
+**The `action` from Step 7.1 must be visible for each item**, so the user can tell at a glance whether each is "new / reply / skipped" and why. Items marked SKIP_DUPLICATE / SKIP_SUPERSEDED must also be listed (even though they will not enter the Step 8 send loop) — this lets the user see "what the LLM saw from existing discussions and deliberately withdrew".
+
+Start the summary with a **one-line tally** so the user knows how many will actually be sent:
+
+```
+Found N issues: will send M (NEW = a / REPLY = b), skipping S (SKIP_DUPLICATE = c / SKIP_SUPERSEDED = d)
+```
+
+Then list each item. For items that matched a historical discussion, show the `ref_note` (one-line gist) only — **do not** expand the original thread in full here; the full `notes[]` is expanded in the Step 8.1 REPLY preview to keep Step 7.5 compact. Format:
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. [CRITICAL] src/foo.ts:42
+   Send mode: new discussion
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-问题：SQL 字符串拼接导致注入
+Issue: SQL string concatenation → injection
 
-diff 上下文（±3 行，`>` 标出目标行，保留 +/- 前缀）：
+Diff context (±3 lines, `>` marks the target line; +/- prefixes preserved):
    39 |     const xs = input.map(x => x.id);
    40 |     if (!xs.length) return [];
    41 |
@@ -324,42 +417,57 @@ diff 上下文（±3 行，`>` 标出目标行，保留 +/- 前缀）：
    44 |
    45 |   export default handler;
 
-建议：改用参数化查询，如 db.query('SELECT * FROM t WHERE id = ANY($1)', [xs])
+Suggestion: use parameterized queries, e.g. db.query('SELECT * FROM t WHERE id = ANY($1)', [xs])
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 2. [WARNING] src/bar.ts:77
+   Send mode: reply to discussion #a1b2c3d4
+   ref_note: @alice noted insufficient null handling but did not mention the timeout case
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. [SUGGESTION] src/baz.ts:15
+   Send mode: skipped (SKIP_DUPLICATE)
+   ref_note: @bob already raised the same naming issue, still unresolved
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+(Not sent — shown so you can verify the LLM's judgment.)
 ```
 
-上下文来源：
-- 若 Step 5/6 已抓取文件内容，从内存中切 `目标行 ±3 行`
-- 否则按需再调一次 `GET /files/FILE?ref=$HEAD_SHA` 取内容后切片
-- 保留每行的 `+` / `-` 前缀以区分变更状态；context 行不加前缀
+Source for the context snippet:
+- If the file content was already fetched in Steps 5/6, slice `target ± 3 lines` from memory.
+- Otherwise fetch it on demand via `GET /files/FILE?ref=$HEAD_SHA` and slice.
+- Keep the `+` / `-` prefixes on changed lines so the user can distinguish adds/deletes; context lines have no prefix.
 
-然后明确问用户：**"以上 N 条是否准备开始逐条发送？是则进入 Step 8，会在每条发送前再预览一次完整 body 和 position，等待你批准。"**
+Then ask the user explicitly: **"Will send M and skip S — start sending one by one? Yes enters Step 8, which previews the full body and position for each item and waits for your approval before posting."**
 
-用户可以在这里：
-- 直接批准 → 进入 Step 8 逐条走
-- 要求删改某几条 → 调整清单后再次汇总
-- 改变某条严重度 → 调整后再汇总
-- 全部取消 → 结束流程
+At this prompt the user can:
+- Approve directly → proceed to Step 8, one at a time.
+- Edit/remove some items → adjust the list and re-summarize.
+- Change an item's severity → adjust and re-summarize.
+- **Override a SKIP**: if they disagree with the LLM's SKIP_DUPLICATE / SKIP_SUPERSEDED decision, they can request it be converted back to NEW or REPLY, re-summarize, then send.
+- Cancel everything → end the flow.
 
 ---
 
-## Step 8 — 逐条预览 → 等待批准 → 发送
+## Step 8 — Per-item preview → await approval → send
 
-**绝对规则**：每条评论发送前必须先向用户展示"预览 + 上下文代码"，并等待用户明确批准（"可以"/"发"/"ok"），才能调用 `curl` / `Invoke-RestMethod` 发送。用户可以在每条上选择：批准、跳过、修改 body 后再批准。
+**Hard rule**: before every comment is posted, show the user a "preview + context code" block and **wait for explicit approval** ("ok" / "send" / "y") before calling `curl` / `Invoke-RestMethod`. For each item the user may: approve, skip, or edit the body and then approve.
 
-### 8.1 单条预览格式
+**Only items with `action ∈ {NEW, REPLY}` from Step 7.1 enter this step**; `SKIP_*` items are excluded.
 
-对第 N 条问题，向用户输出如下结构（纯文本，不要立刻调用 API）：
+### 8.1 Single-item preview format
+
+For the Nth issue, print the following block as plain text (do NOT call the API yet):
+
+**NEW (opens a new discussion):**
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 [N/Total] [CRITICAL] src/foo.ts:42
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-上下文代码（±3 行，`>` 标出目标行）：
+Send mode: new discussion
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Context (±3 lines, `>` marks the target line):
    39 |   const xs = input.map(x => x.id);
    40 |   if (!xs.length) return [];
    41 |
@@ -368,36 +476,62 @@ diff 上下文（±3 行，`>` 标出目标行，保留 +/- 前缀）：
    44 |
    45 | export default handler;
 
-评论内容（将作为 body 发送）：
+Comment body (will be sent as body):
 **[CRITICAL]** 直接拼 SQL 字符串会导致注入，改用参数化查询…
 
-position 字段：
+position fields:
   new_path = src/foo.ts
   new_line = 42
-  (或 old_path/old_line 若是纯删除行)
+  (or old_path/old_line for a pure deletion line)
 
-是否发送？[y = 发送 / n = 跳过 / e = 修改内容]
+Send? [y = send / n = skip / e = edit body]
 ```
 
-**上下文代码来源**：若在 Step 6 已抓取文件全量内容可直接切片；否则按需再拉一次 `files/FILE?ref=$HEAD_SHA`，截取 `new_line ± 3` 行。
+**REPLY (replies to an existing discussion):**
 
-### 8.2 用户批准后再构造并发送请求
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[N/Total] [WARNING] src/bar.ts:77
+Send mode: reply to discussion #a1b2c3d4
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Existing discussion (full thread):
+  @alice (2026-05-08): 这里 null 检查不足，应该…
+  @bob   (2026-05-09): 同意，另外 …
 
-用户回复 `y` 后，才执行下方 `curl` / `Invoke-RestMethod` 命令。发送完把 GitLab 返回的 `discussion id` 或错误码回报给用户，再进入第 N+1 条。
+Context (±3 lines, `>` marks the target line):
+   74 |   if (user) {
+   75 |     return user.name;
+   76 |   }
+ > 77 |   return fetchName(id, { timeout: 0 });
+   78 | }
 
-- 返回 422 → 告知用户行号不在 diff 中，标记为"跳过"，不自动重试
-- 返回非 2xx → 展示错误，让用户决定重试 / 跳过
+Reply body (will be sent as body, no position field):
+**[WARNING]** 针对上面关于 null 检查的讨论，补充一点：timeout: 0 会导致…
 
-**bash（macOS / Linux）：**
+Send? [y = send / n = skip / e = edit body]
+```
+
+**Source for the context snippet**: if a full file was already fetched in Step 6, slice from memory; otherwise fetch `files/FILE?ref=$HEAD_SHA` again and slice `new_line ± 3` lines.
+
+### 8.2 After approval, build and send the request
+
+Once the user replies `y`, choose the command below based on `action`. After sending, report GitLab's returned `discussion id` / `note id` or error to the user, then move to item N+1.
+
+- 422 → tell the user the line is not in the diff, mark as "skipped", do not auto-retry.
+- Non-2xx → show the error, let the user decide retry vs. skip.
+
+#### 8.2.a NEW — open a new discussion (with position)
+
+**bash (macOS / Linux):**
 
 ```bash
-# 新增行 / context 行 → 用 new_line
+# Addition / context line → use new_line
 curl -sfk -X POST \
   -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   -H "Content-Type: application/json" \
   "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions" \
   -d '{
-    "body": "**[严重程度]** 问题描述",
+    "body": "**[severity]** issue description",
     "position": {
       "base_sha":      "'"$BASE_SHA"'",
       "start_sha":     "'"$START_SHA"'",
@@ -408,13 +542,13 @@ curl -sfk -X POST \
     }
   }'
 
-# 纯删除行 → 用 old_line
+# Pure deletion line → use old_line
 curl -sfk -X POST \
   -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
   -H "Content-Type: application/json" \
   "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions" \
   -d '{
-    "body": "**[严重程度]** 问题描述",
+    "body": "**[severity]** issue description",
     "position": {
       "base_sha":      "'"$BASE_SHA"'",
       "start_sha":     "'"$START_SHA"'",
@@ -426,12 +560,12 @@ curl -sfk -X POST \
   }'
 ```
 
-**PowerShell（Windows）：**
+**PowerShell (Windows):**
 
 ```powershell
-# 新增行 / context 行 → 用 new_line
+# Addition / context line → use new_line
 $body = @{
-  body = "**[严重程度]** 问题描述"
+  body = "**[severity]** issue description"
   position = @{
     base_sha      = "ACTUAL_BASE_SHA"
     start_sha     = "ACTUAL_START_SHA"
@@ -449,22 +583,55 @@ Invoke-RestMethod -Method Post `
   -SkipCertificateCheck `
   -Body $body
 
-# 纯删除行 → 将 new_line/new_path 替换为 old_line/old_path
+# Pure deletion line → swap new_line/new_path for old_line/old_path
 ```
 
-> PowerShell 要点：用 `ConvertTo-Json` 构造 body 避免引号转义；SHA 值填入实际值；`Invoke-RestMethod` 会自动解析响应 JSON。
+> PowerShell notes: use `ConvertTo-Json` to build the body (avoids quote-escaping pitfalls); substitute the real SHA values; `Invoke-RestMethod` parses the response JSON automatically.
 
-**绝对禁止**：
-- 未经用户批准批量连发所有评论（即使 Step 7.5 已汇总过也不行——那一步只是粗筛，Step 8 必须逐条再确认）
-- 跳过预览直接执行 `curl -X POST`
+#### 8.2.b REPLY — reply to an existing discussion (no position)
+
+**bash (macOS / Linux):**
+
+```bash
+# Replace DISCUSSION_ID with the reply_to value recorded in Step 7.1
+curl -sfk -X POST \
+  -H "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  -H "Content-Type: application/json" \
+  "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions/DISCUSSION_ID/notes" \
+  -d '{
+    "body": "**[severity]** reply text"
+  }'
+```
+
+**PowerShell (Windows):**
+
+```powershell
+$body = @{
+  body = "**[severity]** reply text"
+} | ConvertTo-Json -Depth 3
+
+Invoke-RestMethod -Method Post `
+  -Uri "$GITLAB_HOST/api/v4/projects/$PROJECT_PATH_ENCODED/merge_requests/$MR_IID/discussions/DISCUSSION_ID/notes" `
+  -Headers @{"PRIVATE-TOKEN" = $env:GITLAB_TOKEN} `
+  -ContentType "application/json" `
+  -SkipCertificateCheck `
+  -Body $body
+```
+
+**Strictly forbidden**:
+- Sending all comments in bulk without per-item approval (even though Step 7.5 summarized them — that was a coarse pass; Step 8 must re-confirm each one).
+- Skipping the preview and jumping straight to `curl -X POST`.
+- Sending any request for `SKIP_DUPLICATE` / `SKIP_SUPERSEDED` items.
 
 ---
 
 ## Troubleshooting
 
-| Error                        | Fix                                                               |
-| ---------------------------- | ----------------------------------------------------------------- |
-| 401                          | Token 无效或缺少 `api` scope                                      |
-| 404                          | 路径错误，检查 `%2F` 编码                                         |
-| 422                          | 行号不在 diff 中，跳过                                            |
-| Exit code 49（Windows bash） | IPv6 绑定或代理冲突，curl 加 `--ipv4`；若仍失败加 `--noproxy '*'` |
+| Error                         | Fix                                                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------- |
+| 401                           | Token invalid or missing the `api` scope.                                                             |
+| 404 (NEW)                     | Project path wrong — check `%2F` encoding.                                                            |
+| 404 (REPLY)                   | Wrong `DISCUSSION_ID` or the discussion was deleted. Downgrade to NEW (resend with position) or skip. |
+| 400 / 403 (REPLY)             | Target discussion is already resolved or the instance disallows appending to it. Downgrade to NEW or skip — do NOT force an unresolve. |
+| 422                           | Line number is not in the diff — skip.                                                                |
+| Exit code 49 (Windows bash)   | IPv6 binding or proxy conflict. Add `--ipv4` to curl; if it still fails, add `--noproxy '*'`.         |
