@@ -21,7 +21,7 @@ description: Fetch, review, and post inline comments on a GitLab Merge Request. 
 
 Claude Code prompts for approval on any command that expands `$GITLAB_TOKEN` / `$env:GITLAB_TOKEN`. **Without the hook, a single MR review can trigger dozens of approval prompts.** This skill treats the hook as a hard prerequisite — if it is not in place, **abort immediately** and do not proceed to any later step.
 
-**Required hook version for this skill: `REQUIRED_HOOK_VERSION = 1.2.0`** (bumped whenever the template changes).
+**Required hook version for this skill: `REQUIRED_HOOK_VERSION = 1.3.0`** (bumped whenever the template changes).
 
 ### 0.1 Read the hook file with the Read tool and extract its version
 
@@ -40,8 +40,8 @@ Once read:
 | `local` value | Status | Action |
 |---------------|--------|--------|
 | `MISSING`     | Not installed | Go to **A. Not installed — install on the user's behalf** |
-| equal to `1.2.0` | Up to date | Treat as configured; continue to Step 1 |
-| less than `1.2.0` | Outdated | Go to **B. Outdated — upgrade on the user's behalf** |
+| equal to `1.3.0` | Up to date | Treat as configured; continue to Step 1 |
+| less than `1.3.0` | Outdated | Go to **B. Outdated — upgrade on the user's behalf** |
 
 > After any configuration change the user **must restart their Claude Code session** and re-run `/gitlab-mr-review <MR URL>` — new hooks are only loaded on session startup.
 
@@ -62,7 +62,7 @@ Do not just point the user at HOOK-SETUP.md and walk away; **guide them through 
    - Before writing back, **preview the final JSON to the user and get explicit confirmation**.
 5. Once everything is in place, print this line:
 
-   > Hook installed (version 1.2.0), host = `<USER_HOST>`. **Please restart your Claude Code session**, then re-run `/gitlab-mr-review <MR URL>` so the new hook is loaded.
+   > Hook installed (version 1.3.0), host = `<USER_HOST>`. **Please restart your Claude Code session**, then re-run `/gitlab-mr-review <MR URL>` so the new hook is loaded.
 
 **Boundaries**:
 - Do not set or modify the user's `GITLAB_TOKEN` / `$env:GITLAB_TOKEN` — the token must be configured by the user in their own shell profile.

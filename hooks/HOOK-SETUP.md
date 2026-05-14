@@ -50,6 +50,12 @@ ALLOWED_HOST="gitlab.example.com"
         "hooks": [
           { "type": "command", "command": "~/.claude/hooks/allow-gitlab-curl.sh" }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "~/.claude/hooks/allow-gitlab-curl.sh" }
+        ]
       }
     ]
   }
@@ -114,13 +120,19 @@ $AllowedHost = 'gitlab.example.com'
         "hooks": [
           { "type": "command", "command": "pwsh -NoProfile -File %USERPROFILE%\\.claude\\hooks\\allow-gitlab-curl.ps1" }
         ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          { "type": "command", "command": "pwsh -NoProfile -File %USERPROFILE%\\.claude\\hooks\\allow-gitlab-curl.ps1" }
+        ]
       }
     ]
   }
 }
 ```
 
-> `matcher` 保持 `"Bash"`——Claude Code 在 Windows 上的 shell 工具仍以 `Bash` 名字派发。脚本内部会同时兼容 `curl.exe` 与 `Invoke-RestMethod` 两种命令形态。
+> `matcher: "Bash"` 放行 GitLab API 的 curl / Invoke-RestMethod 请求；`matcher: "Read"` 放行 skill Step 0 读取 hook 文件本身。脚本内部会同时兼容 `curl.exe` 与 `Invoke-RestMethod` 两种命令形态。
 
 若已存在 `hooks.PreToolUse` 配置，合并到数组中即可；注册过则跳过。
 

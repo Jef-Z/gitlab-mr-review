@@ -7,7 +7,7 @@
 $ErrorActionPreference = 'Stop'
 
 # 版本号——模板每次改动必须 bump，SKILL.md 会据此引导用户升级
-$HookVersion = '1.2.0'
+$HookVersion = '1.3.0'
 
 # 只信任这个 host，换成你自己的（多个 host 改为数组循环匹配）
 $AllowedHost = 'gitlab.example.com'
@@ -23,6 +23,21 @@ try {
 
 $tool = $input.tool_name
 $cmd  = $input.tool_input.command
+
+# 允许 Read 工具读取 hook 文件本身（gitlab-mr-review skill Step 0 需要）
+if ($tool -eq 'Read') {
+    $filePath = $input.tool_input.file_path
+    if ($filePath -match '[\\/]\.claude[\\/]hooks[\\/]allow-gitlab-curl\.(sh|ps1)$') {
+        @{
+            hookSpecificOutput = @{
+                hookEventName            = 'PreToolUse'
+                permissionDecision       = 'allow'
+                permissionDecisionReason = 'Reading GitLab MR review hook file'
+            }
+        } | ConvertTo-Json -Depth 5 -Compress
+    }
+    exit 0
+}
 
 if ($tool -ne 'Bash' -and $tool -ne 'PowerShell') { exit 0 }
 if (-not $cmd) { exit 0 }
